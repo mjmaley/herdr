@@ -337,6 +337,18 @@ pub(crate) use unix_common::{
 mod client_state;
 pub(crate) use client_state::{create_private_state_file, replace_file, sync_parent_directory};
 
+mod client_control;
+#[cfg(windows)]
+pub(crate) use client_control::validate_client_control_peer;
+pub(crate) use client_control::{
+    prepare_client_control_directory, validate_client_control_directory,
+    validate_client_control_socket,
+};
+#[cfg(windows)]
+mod client_control_stream;
+#[cfg(windows)]
+pub(crate) use client_control_stream::ClientControlStream;
+
 #[cfg(not(unix))]
 pub(crate) fn begin_cli_output() {}
 

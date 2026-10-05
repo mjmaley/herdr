@@ -466,6 +466,98 @@ v1 没有 Herdr 管理的插件存储 API。`HERDR_PLUGIN_CONFIG_DIR` 和 `HERDR
 
 `plugin.pane.open` 要求已安装、已启用、平台兼容的插件,然后把请求的清单 `[[panes]]` 入口点作为 argv 支撑的终端窗格启动。清单窗格的 `placement` 默认为 `overlay`;请求的 `placement` 可以用 `overlay`、`popup`、`split`、`tab` 或 `zoomed` 覆盖清单。overlay 和 popup 使用活动平铺窗格作为启动上下文。弹窗终端是会话级模态界面,不会改变标签页布局;可选的 `width` 和 `height` 以终端单元格数或 `"80%"` 这样的百分比设置外层尺寸。省略时默认为终端大小的一半,过小的值会限制为弹窗最小尺寸。弹窗没有窗格 id,不属于任何 `pane.*` 或智能体 API,不会发出窗格生命周期事件,会把插件焦点上下文保留在底层平铺窗格上,也不会向其进程导出 `HERDR_PANE_ID`。弹窗启动返回 `ok`;`popup.close` 关闭活动弹窗,没有弹窗时返回 `popup_not_open`。split 和 zoomed 针对已有窗格,tab 可以针对工作区。split、tab、zoomed 和 overlay 打开后表现得像普通 Herdr 窗格,`plugin.pane.focus` 和 `plugin.pane.close` 仍可操作这些窗格。
 
+## 客户端本地控制 (实验性分支)
+
+基于稳定版 v0.9.3 的 `mjmaley/herdr` 分支新增了独立的、**由客户端拥有**的 API，用于检查和导航本地完整 TUI。它不属于上文的服务器 socket API、`herdr api schema`、已冻结的端点编解码器或上游已安装的发行版。完整 TUI 和 `herdr client` 命令都必须使用该分支构建的二进制。此功能不会安装或更新现有的 Herdr 二进制。
+
+每个完整 TUI 都在 `state_dir()/client/control/<client-id>.sock` 提供自己的端点，其中 `client-id` 是该 TUI 实例的不透明 ID，由 32 个小写十六进制字符组成。使用 `herdr client list --json` 发现存活端点及其 `socket_path`；不要根据 PID、配置标签或服务器 socket 覆盖设置推导端点。CLI 只选择一个客户端：有多个存活客户端时，必须指定 `--client <complete-id>`。不会广播，也不会任意选择第一个客户端。
+
+在 Unix 上，端点是在仅所有者可访问、权限为 `0700` 的控制目录中的 Unix 域 socket；socket 权限为 `0600`，发现过程会拒绝符号链接、其他用户拥有的条目，以及组或其他用户可访问的条目。在 Windows 上，端点使用仅所有者和 SYSTEM 可访问的命名管道，并附带发现标记；符号链接或重解析点标记会被拒绝。这是同一用户的本地控制接口，不是网络服务。
+
+线协议使用换行分隔的 UTF-8 JSON：每个连接只处理一个请求和一个响应，不支持事件订阅。请求必须恰好包含 `id`、`method` 和 `params`。`id` 必须是非空字符串，最多 256 字节；`params` 必须是对象。未知的顶层字段、方法和参数字段都会被拒绝。
+
+请求帧上限为 64 KiB，响应帧上限为 4 MiB，均不包含换行符。读写操作的截止时间为 2 秒；TUI 回复截止时间为快照 3 秒、focus 60 秒。CLI 的总交换截止时间另加 4 秒用于传输。每个端点最多允许 8 个并发连接。调用方断开连接会取消其尚未完成的导航请求。
+
+```json
+{"id":"inspect-1","method":"client.snapshot","params":{}}
+{"id":"navigate-1","method":"client.focus","params":{"machine_id":"local","pane_id":"w1:p1"}}
+```
+
+| 方法 | 参数 | 含义 |
+| --- | --- | --- |
+| `client.snapshot` | 仅接受 `{}` | 读取此 TUI 当前的选择、切换标志以及机器和智能体元数据。 |
+| `client.focus` | 必需的字符串 `machine_id`；可选的字符串 `pane_id` | 激活这台机器，并可选地聚焦其中一个窗格。仅切换机器时省略 `pane_id`；不接受 `null`。 |
+
+原始 API 接受 `machine_id="local"` 或已启用的已保存配置的不透明 32 字符 ID，**不接受标签或 SSH 主机名**。CLI 会在发出请求前，将唯一且区分大小写的标签解析为 ID。窗格 ID 必须精确匹配，且只在目标机器内有效。此端点只改变客户端呈现状态：绝不会发送终端输入、运行 shell 命令，也不会安装、更新、启动或重启 Herdr。`--machine` 不能将这些请求转发到远程服务器。
+
+成功的快照响应结构如下：
+
+```json
+{
+  "id": "inspect-1",
+  "result": {
+    "client_id": "0123456789abcdef0123456789abcdef",
+    "selected_machine_id": "local",
+    "selected_pane_id": "w1:p1",
+    "transitioning": false,
+    "machines": [
+      {
+        "machine_id": "local",
+        "label": "Local",
+        "status": "online",
+        "boot_id": "server-boot-id",
+        "focused_pane_id": "w1:p1",
+        "agents": [
+          {
+            "pane_id": "w1:p1",
+            "tab_id": "w1:t1",
+            "workspace_id": "w1",
+            "agent": "claude",
+            "agent_status": "working",
+            "focused": true,
+            "state_change_seq": 42
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`selected_pane_id`、`boot_id` 和 `focused_pane_id` 可以为 `null`；不知道智能体标识时，`agent` 可以为 `null`。`transitioning` 和智能体的 `focused` 是布尔值，`state_change_seq` 是无符号整数。机器 ID 和工作区、标签页、窗格 ID 都是字符串。每个机器条目包含其当前标签和连接状态；只有在线机器的元数据提供智能体。离线智能体缓存会被排除，不会作为实时观测结果返回。
+
+智能体的 `focused` 只有在其所属客户端端点和窗格确实被选中时才为 true；`transitioning=true` 时，所有智能体都返回 `focused=false`。`focused_pane_id` 表示某台机器已知的窗格选择，不能将其视为该 TUI 当前正在呈现这台机器的证明。
+
+使用 **`machine_id` + `boot_id` + `pane_id`** 作为智能体身份。不同服务器可以复用窗格 ID，同一个已保存配置对应的服务器重启后也可能复用这些 ID。`state_change_seq` 描述该次服务器运行中的智能体状态，不是全局修订号。此处有意**不提供 `terminal_id`**：客户端 shell 的智能体元数据不包含该字段。如有需要，请通过相应的服务器 API 获取终端 ID。
+
+只有协调一致的机器激活、可选的窗格聚焦以及呈现同步屏障完成后，focus 才会返回成功。请求进入队列不等于成功。导航串行执行；并发切换会以忙碌错误拒绝，用户导航会取代尚未完成的 API 导航。错误和超时不意味着已回滚；失败后请读取新快照，不要盲目重放 focus 请求。
+
+Focus 返回精确的目标机器 ID 以及请求的窗格 ID；仅激活机器时，窗格 ID 返回 `null`：
+
+```json
+{"id":"navigate-1","result":{"machine_id":"local","pane_id":"w1:p1"}}
+```
+
+响应回显请求 ID，并且只包含 `result` 或 `error`，不会同时包含两者：
+
+```json
+{"id":"navigate-1","error":{"code":"invalid_params","message":"pane_id must be a string when supplied"}}
+```
+
+JSON 格式错误或无法解码请求 ID 时，使用 `id=""`。线协议错误包括 `invalid_request`、`invalid_params`、`method_not_found`、`request_too_large`、`response_too_large`、`client_unavailable` 和 `timeout`。传输失败也可能直接关闭连接，或产生 CLI I/O 错误。过期端点和无响应客户端不会列为存活客户端。
+
+| 导航错误码 | 含义 |
+| --- | --- |
+| `client_busy` | 已有另一个切换或导航请求尚未完成。 |
+| `client_unavailable` | 完整 TUI 正在关闭，或无法传递或完成请求。 |
+| `invalid_params` | 选择器或参数不符合该方法的约定。 |
+| `machine_not_found` | 机器 ID 不是已知且已启用的目标。 |
+| `machine_unavailable` | 目标机器不在线或无法使用。 |
+| `pane_not_found` | 请求的窗格不在该机器上。 |
+| `activation_failed` | 机器激活或窗格聚焦无法协调一致地完成。 |
+| `superseded` | 用户导航或其他具有决定权的选择变化取消了请求。 |
+| `timeout` | 请求在完成前已达到有界截止时间。 |
+
 ## Socket 传输
 
 Herdr 在本地 socket 上使用换行分隔的 JSON。在 Unix 上,那个 socket 是 Unix 域 socket。在 Windows 上,是命名管道。

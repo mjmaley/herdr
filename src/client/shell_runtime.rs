@@ -7,6 +7,7 @@ pub(super) fn dispatch_client_shell_actions(
     mut shell: Option<&mut shell::ClientShellState>,
     detached_process_children: &mut Vec<std::process::Child>,
     scheduled_activation: &mut Option<ClientLoopEvent>,
+    control_focus_pending: bool,
 ) -> Result<(Vec<crossterm::event::MouseEvent>, bool), ClientError> {
     let mut replay_mouse = Vec::new();
     let mut repaint = false;
@@ -17,13 +18,43 @@ pub(super) fn dispatch_client_shell_actions(
                 boot_id,
                 request,
             } => {
-                if let Some(connection) = endpoints.connection(&endpoint_id).filter(|_| {
-                    endpoints.active_id() == &endpoint_id && endpoints.active_surface_available()
-                }) {
-                    endpoint_commands.enqueue(endpoint_id, connection.generation, boot_id, request);
-                } else if let Some(shell) = shell.as_deref_mut() {
+                // Human navigation owns the next selection, even while API focus
+                // has fenced the committed surface. Retarget through activation.
+                let target = match request.method {
+                    crate::api::schema::Method::WorkspaceFocus(params) if control_focus_pending => {
+                        shell::ClientEndpointFocusTarget::Workspace(params.workspace_id)
+                    }
+                    crate::api::schema::Method::TabFocus(params) if control_focus_pending => {
+                        shell::ClientEndpointFocusTarget::Tab(params.tab_id)
+                    }
+                    crate::api::schema::Method::PaneFocus(params) if control_focus_pending => {
+                        shell::ClientEndpointFocusTarget::Pane(params.pane_id)
+                    }
+                    _ => {
+                        if let Some(connection) = endpoints.connection(&endpoint_id).filter(|_| {
+                            endpoints.active_id() == &endpoint_id
+                                && endpoints.active_surface_available()
+                        }) {
+                            endpoint_commands.enqueue(
+                                endpoint_id,
+                                connection.generation,
+                                boot_id,
+                                request,
+                            );
+                        } else if let Some(shell) = shell.as_deref_mut() {
+                            repaint |= shell.cancel_endpoint_request(&request.id);
+                        }
+                        continue;
+                    }
+                };
+                if let Some(shell) = shell.as_deref_mut() {
                     repaint |= shell.cancel_endpoint_request(&request.id);
                 }
+                *scheduled_activation = Some(ClientLoopEvent::ActivateEndpoint {
+                    endpoint_id,
+                    target: Some(target),
+                    force: false,
+                });
             }
             shell::ClientShellAction::ClipboardWrite(bytes) => {
                 crate::selection::write_osc52_bytes(&bytes);
@@ -148,7 +179,7 @@ pub(super) fn apply_client_shell_input_source_changes(
     }
 }
 
-fn install_pending_activation(
+pub(super) fn install_pending_activation(
     state: &mut ClientState,
     endpoint_commands: &mut endpoint_commands::EndpointCommands,
     pending: &mut Option<endpoint::PendingEndpointActivation>,
@@ -216,6 +247,10 @@ pub(super) fn begin_endpoint_activation(
     now: std::time::Instant,
     scheduled_activation: &mut Option<ClientLoopEvent>,
 ) -> Result<(), ClientError> {
+    state.fail_control_focus(
+        "superseded",
+        "Navigation was superseded by another client selection.",
+    );
     state.deferred_local_activation = None;
     if endpoint_id.is_local() && !local_activation_metadata_ready(state, endpoints) {
         state.deferred_local_activation = Some(endpoint::EndpointActivationIntent {
@@ -268,6 +303,7 @@ pub(super) fn begin_endpoint_activation(
                 Some(shell),
                 &mut state.detached_process_children,
                 scheduled_activation,
+                false,
             )?;
             if repaint {
                 if let Some(frame) = shell.compose(state.reported_size.0, state.reported_size.1) {
@@ -375,7 +411,8 @@ pub(super) fn complete_endpoint_activation(
         match activation.complete(shell, endpoints) {
             Ok(completion) => completion,
             Err(error) => {
-                shell.receive_endpoint_unavailable(error);
+                shell.receive_endpoint_unavailable(error.clone());
+                state.fail_control_focus("activation_failed", error);
                 return Ok(None);
             }
         }
@@ -406,6 +443,7 @@ pub(super) fn complete_endpoint_activation(
     }
 
     let _ = pending.take();
+    let activation_succeeded = completion == endpoint::ActivationCompletion::Activated;
     endpoints.unfreeze_input();
     let successor = match completion {
         endpoint::ActivationCompletion::RestoredSource {
@@ -413,6 +451,7 @@ pub(super) fn complete_endpoint_activation(
             successor: next,
             ..
         } => {
+            state.fail_control_focus("activation_failed", &error);
             if next.is_none() {
                 if let Some(shell) = state.shell.as_mut() {
                     shell.receive_endpoint_unavailable(error);
@@ -445,6 +484,11 @@ pub(super) fn complete_endpoint_activation(
     if let Some(frame) = frame {
         state.present_frame(frame);
     }
+    if activation_succeeded {
+        if let Some(request) = state.control_focus.take() {
+            request.complete();
+        }
+    }
     // A Local selection made while reconnecting is newer than this transaction's successor.
     if let Some(intent) = successor.filter(|_| state.deferred_local_activation.is_none()) {
         return Ok(Some(ClientLoopEvent::ActivateEndpoint {
@@ -457,6 +501,7 @@ pub(super) fn complete_endpoint_activation(
 }
 
 pub(super) fn present_handoff_unavailable(state: &mut ClientState, message: String) {
+    state.fail_control_focus("activation_failed", &message);
     // An unavailable committed endpoint has no presentation lease. Keep all pane input and late
     // source output blocked, while allowing this client-owned chrome frame through the freeze.
     state.freeze_presentation();
@@ -476,6 +521,7 @@ pub(super) fn rollback_endpoint_activation(
     error: String,
     source_release_rejected: bool,
 ) {
+    state.fail_control_focus("activation_failed", &error);
     let Some(activation) = pending.as_mut() else {
         return;
     };
@@ -501,6 +547,13 @@ pub(super) fn handle_endpoint_disconnect(
     now: std::time::Instant,
     notice: &str,
 ) -> bool {
+    if state
+        .control_focus
+        .as_ref()
+        .is_some_and(|request| &request.endpoint_id == endpoint_id)
+    {
+        state.fail_control_focus("machine_unavailable", notice);
+    }
     supervisors.disconnected(endpoint_id, generation, now);
     #[cfg(unix)]
     state.retire_endpoint_graphics(endpoint_id, generation);
@@ -556,6 +609,13 @@ pub(super) fn handle_endpoint_attention(
     now: std::time::Instant,
     message: String,
 ) -> bool {
+    if state
+        .control_focus
+        .as_ref()
+        .is_some_and(|request| &request.endpoint_id == endpoint_id)
+    {
+        state.fail_control_focus("machine_unavailable", &message);
+    }
     endpoints.disconnect(endpoint_id);
     supervisors.record_status(
         endpoint_id,
@@ -718,6 +778,7 @@ pub(super) fn finish_client_shell_input(
         state.shell.as_mut(),
         &mut state.detached_process_children,
         scheduled_activation,
+        state.control_focus.is_some(),
     )?;
     let frame = if dispatch_repaint {
         state

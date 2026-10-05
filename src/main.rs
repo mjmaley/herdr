@@ -19,6 +19,7 @@ mod build_info;
 mod checksum;
 mod cli;
 mod client;
+mod client_control;
 mod config;
 mod copy_mode;
 mod detect;
@@ -607,6 +608,7 @@ fn main() -> io::Result<()> {
         println!("       herdr update [--handoff]");
         println!("       herdr channel set <stable|preview>");
         println!("       herdr machine <subcommand> ...");
+        println!("       herdr client <subcommand> ...");
         println!("       herdr server stop");
         println!("       herdr server reload-config");
         println!("       herdr api <subcommand> ...");
@@ -652,6 +654,10 @@ fn main() -> io::Result<()> {
                 "Manage the stable or preview update channel",
             ),
             ("herdr machine <subcommand>", "Manage saved SSH machines"),
+            (
+                "herdr client list|snapshot|focus",
+                "Inspect or navigate one local TUI client (experimental fork)",
+            ),
             (
                 "herdr api <subcommand>",
                 "Inspect socket API metadata and live runtime state",

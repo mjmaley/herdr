@@ -75,6 +75,7 @@ pub(super) struct ClientState {
     pub(super) presentation_frozen: bool,
     /// Latest explicit Local selection awaiting this client's replacement Local connection.
     pub(super) deferred_local_activation: Option<endpoint::EndpointActivationIntent>,
+    pub(super) control_focus: Option<control::PendingControlFocus>,
     pub(super) draw_host_cursor: bool,
     pub(super) detached_process_children: Vec<std::process::Child>,
     pub(super) shell: Option<shell::ClientShellState>,
@@ -82,6 +83,10 @@ pub(super) struct ClientState {
 
 impl Drop for ClientState {
     fn drop(&mut self) {
+        self.fail_control_focus(
+            "client_unavailable",
+            "The client closed before navigation completed.",
+        );
         if self.attach_escape.is_some() {
             let _ = crate::terminal_modes::set_direct_host_keyboard_protocol(
                 &mut io::stdout(),
@@ -131,6 +136,7 @@ impl ClientState {
             repaint_pending: false,
             presentation_frozen: false,
             deferred_local_activation: None,
+            control_focus: None,
             draw_host_cursor: false,
             detached_process_children: Vec::new(),
             shell: Some(shell::ClientShellState::new(

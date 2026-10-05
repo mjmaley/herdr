@@ -2,6 +2,7 @@ use std::io::Write;
 
 use clap::{Arg, ArgAction, ArgGroup, Command, ValueHint};
 
+mod client;
 mod completion;
 mod machine;
 
@@ -35,6 +36,7 @@ pub(super) fn command() -> Command {
         .subcommand(config_command())
         .subcommand(channel_command())
         .subcommand(machine::command())
+        .subcommand(client::command())
         .subcommand(server_command())
         .subcommand(api_command())
         .subcommand(workspace_command())

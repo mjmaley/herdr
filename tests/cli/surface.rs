@@ -452,21 +452,6 @@ fn completion_command_prints_zsh_script_without_session_startup() {
 }
 
 #[test]
-fn root_help_hides_explicit_client_command() {
-    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
-        .arg("--help")
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !stdout.contains("herdr client"),
-        "root help should not advertise the internal client command: {stdout}"
-    );
-}
-
-#[test]
 fn root_help_advertises_api_schema_command_group() {
     let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .arg("--help")

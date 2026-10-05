@@ -3,7 +3,7 @@ title: CLI reference
 description: Herdr commands for sessions, workspaces, tabs, panes, notifications, agents, waits, integrations, and status.
 ---
 
-Herdr’s CLI talks to the running server over the same local socket API used by integrations and agents.
+Most of Herdr’s CLI talks to the running server over the same local socket API used by integrations and agents. The experimental fork's `client` commands instead target one local full TUI.
 
 Most commands print JSON responses for deterministic automation in scripts.
 
@@ -83,6 +83,28 @@ Supported commands are `workspace`, `worktree`, `tab`, `pane`, `notification`, `
 Requests and responses travel through the JSON API over non-interactive SSH; API payloads are not interpolated into the SSH shell command. No open TUI is required, and the bridge never installs, starts, or restarts a server. Update the local CLI and remote Herdr installation to support machine forwarding, and keep the running remote server's API protocol compatible. Authentication, unavailable machines, and incompatible versions fail without falling back to Local. Requests are not automatically retried after connection failure.
 
 Local pane IDs are not inherited by remote commands. Use explicit remote IDs; `--current` cannot refer to the caller's local pane. Remote worktree paths must be absolute, `~`, or start with `~/` (expanded on the server); plugin link paths must be absolute. The prefix targets one machine at a time; combined listings and routing through another TUI's connections are not included.
+
+## Local TUI control (experimental fork)
+
+These commands are implemented in the `mjmaley/herdr` fork based on stable v0.9.3. They are not available in the upstream installed release. Run the fork's built binary and open a full TUI using that binary; this feature does not replace or update your installed Herdr.
+
+```bash
+herdr client list [--json]
+herdr client snapshot [--client <client-id>]
+herdr client focus <local|label-or-id> [--pane <pane-id>] [--client <client-id>]
+```
+
+`list` probes the fork's client-control sockets with read-only snapshots and reports live clients, current machine/pane selection, transition state, and socket path. `--json` returns an array of snapshot results with an additional `socket_path` field; an empty list returns `[]`. Stale, unreachable, and malformed responders are excluded. `snapshot` prints the selected client's JSON response.
+
+`--client` takes the **complete opaque 32-character lowercase hexadecimal client ID** from `list`, not a prefix, PID, socket path, or machine ID. Omitting it is allowed only when exactly one live client is discovered. With zero clients the command fails; with several it requires explicit selection. Commands never choose an arbitrary client or broadcast.
+
+`focus` resolves `local`, an enabled saved profile ID, or a unique case-sensitive saved label before sending the machine ID to that client's local endpoint. Unknown, disabled, and ambiguous machine selectors fail; SSH hostnames are not selectors. `--pane` is an exact pane ID on that machine, not on the caller's current machine. Obtain online agent pane IDs from `snapshot`; cached offline agents are deliberately excluded.
+
+Success means the requested machine and optional pane have been coherently activated and the presentation fence has completed, not merely that the request was queued. A concurrent navigation request, human supersession, unavailable target, unknown pane, or timeout fails without reporting success. Human navigation takes precedence. A failed or timed-out response does not prove that no partial selection change occurred; read a fresh snapshot before deciding what to do next.
+
+A frozen screen after a machine disconnect is not an in-progress handoff. Select an online machine, such as `local`, to recover presentation.
+
+This API changes client presentation only: it does not send terminal input, run shell commands, install, update, start, or restart Herdr. The global `--machine` prefix does **not** forward `client` commands. Use server commands separately for runtime operations. Syntax/selection errors exit 2; API error responses print to stderr and exit 1; successful commands exit 0. See [Client-local wire contract](/docs/socket-api/#client-local-control-experimental-fork) for exact methods, snapshot fields, and error shapes.
 
 ## Shell completions
 

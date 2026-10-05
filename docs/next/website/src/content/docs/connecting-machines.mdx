@@ -67,6 +67,17 @@ Local opens immediately on startup without waiting for SSH connections. Selectin
 
 When a connection is lost, the last workspace and agent state remains visible but dimmed. That is cached information, not live state. Input and navigation into those cached panes stay disabled until a fresh connection and matching screen arrive. Reconnecting never takes selection away from the machine you are using.
 
+The experimental `mjmaley/herdr` fork also supports changing one **local full TUI's** selection from a separate process:
+
+```bash
+herdr client list
+herdr client snapshot --client <client-id>
+herdr client focus "Build machine" --pane w1:p1 --client <client-id>
+herdr client focus local --client <client-id>
+```
+
+Use the fork's built binary for both the TUI and these commands; this does not update an installed upstream binary. With multiple live TUIs, the exact client ID from `list` is required. Machine labels must be unique and case-sensitive, or use an enabled saved profile ID. Pane IDs are machine-local; use the snapshot's online metadata, not cached offline agents. No request is broadcast or forwarded with `--machine`. Focus changes presentation without injecting input or installing, starting, or restarting Herdr. It reports success only after coherent activation/focus and the presentation fence; unavailable targets, concurrent navigation, human supersession, and timeouts fail. See [CLI reference](/docs/cli-reference/#local-tui-control-experimental-fork) and [wire contract](/docs/socket-api/#client-local-control-experimental-fork).
+
 ## Rename, disable, or remove
 
 Read profile IDs from the list rather than deriving them from labels or hostnames:

@@ -67,6 +67,17 @@ Herdr 分别检查已安装的二进制文件和运行中的服务器，并在�
 
 断线后，最后的工作区和智能体状态仍然可见，但会变暗。这是缓存，不是实时状态。在新连接和对应画面到达前，不能输入或导航到这些缓存窗格。重连不会从正在使用的机器抢走选择。
 
+实验性 `mjmaley/herdr` 分支也支持从另一个进程改变一个**本地完整 TUI** 的选择：
+
+```bash
+herdr client list
+herdr client snapshot --client <client-id>
+herdr client focus "Build machine" --pane w1:p1 --client <client-id>
+herdr client focus local --client <client-id>
+```
+
+TUI 和这些命令都必须使用该分支构建的二进制；这不会更新已安装的上游二进制。有多个存活 TUI 时，必须提供 `list` 返回的完整客户端 ID。机器标签必须唯一且区分大小写，也可以使用已启用的已保存配置 ID。窗格 ID 只在所属机器内有效；请使用快照中的在线元数据，而不是离线智能体缓存。请求不会广播，也不会通过 `--machine` 转发。Focus 只改变呈现状态，不会注入输入，也不会安装、启动或重启 Herdr。只有协调一致的激活和聚焦以及呈现同步屏障完成后，才会报告成功；目标不可用、并发导航、用户操作取代请求或超时都会失败。详见 [CLI 参考](/zh-cn/docs/cli-reference/#本地-tui-控制-实验性分支)和[协议约定](/zh-cn/docs/socket-api/#客户端本地控制-实验性分支)。
+
 ## 重命名、禁用或移除
 
 从列表读取配置 ID，不要根据标签或主机名推测：

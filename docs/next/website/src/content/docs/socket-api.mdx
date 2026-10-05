@@ -603,6 +603,98 @@ pane; tab panes can target a workspace. Split, tab, zoomed, and overlay panes
 behave like normal Herdr panes, and `plugin.pane.focus` and `plugin.pane.close`
 continue to operate on those panes.
 
+## Client-local control (experimental fork)
+
+The `mjmaley/herdr` fork based on stable v0.9.3 adds a separate **client-owned** API for inspecting and navigating a local full TUI. It is not part of the server socket API above, `herdr api schema`, the frozen endpoint codecs, or the upstream installed release. Run the fork's built binary for both the full TUI and `herdr client` commands. This feature does not install or update an existing Herdr binary.
+
+Each full TUI exposes its own endpoint at `state_dir()/client/control/<client-id>.sock`, where `client-id` is an opaque 32-character lowercase hexadecimal ID for that TUI instance. Use `herdr client list --json` to discover live endpoints and their `socket_path`; do not derive them from PIDs, profile labels, or server socket overrides. The CLI selects exactly one client: if several are live, `--client <complete-id>` is required. There is no broadcast or arbitrary first-client selection.
+
+On Unix this is a Unix domain socket in an owner-only `0700` control directory; sockets are `0600`, and discovery rejects symlinks, foreign owners, and group/other-accessible entries. On Windows the endpoint uses an owner/SYSTEM-only named pipe with a discovery marker; symlink/reparse markers are rejected. This is a same-user local control surface, not a network service.
+
+The wire protocol is newline-delimited UTF-8 JSON: one request and one response per connection, with no event subscriptions. Send exactly `id`, `method`, and `params`. `id` is a nonempty string of at most 256 bytes; `params` must be an object. Unknown top-level fields, methods, and parameter fields are rejected.
+
+Request frames are limited to 64 KiB and response frames to 4 MiB, excluding the newline. Reads and writes have 2-second deadlines; the TUI reply deadline is 3 seconds for snapshots and 60 seconds for focus. The CLI's total exchange deadline adds 4 seconds for transport. Each endpoint admits at most 8 concurrent connections. Disconnecting a caller cancels its pending navigation request.
+
+```json
+{"id":"inspect-1","method":"client.snapshot","params":{}}
+{"id":"navigate-1","method":"client.focus","params":{"machine_id":"local","pane_id":"w1:p1"}}
+```
+
+| Method | Parameters | Meaning |
+| --- | --- | --- |
+| `client.snapshot` | `{}` only | Read this TUI's current selection, transition flag, and machine/agent metadata. |
+| `client.focus` | Required string `machine_id`; optional string `pane_id` | Activate this machine and optionally focus one pane there. Omit `pane_id` for machine-only navigation; `null` is not accepted. |
+
+The raw API accepts `machine_id="local"` or an enabled saved profile's opaque 32-character ID, **not a label or SSH hostname**. The CLI resolves unique case-sensitive labels to IDs before making the request. Pane IDs are exact and scoped to the target machine. This endpoint changes only client presentation: it never sends terminal input, runs shell commands, installs, updates, starts, or restarts Herdr. `--machine` cannot forward these requests to a remote server.
+
+A snapshot success response has this shape:
+
+```json
+{
+  "id": "inspect-1",
+  "result": {
+    "client_id": "0123456789abcdef0123456789abcdef",
+    "selected_machine_id": "local",
+    "selected_pane_id": "w1:p1",
+    "transitioning": false,
+    "machines": [
+      {
+        "machine_id": "local",
+        "label": "Local",
+        "status": "online",
+        "boot_id": "server-boot-id",
+        "focused_pane_id": "w1:p1",
+        "agents": [
+          {
+            "pane_id": "w1:p1",
+            "tab_id": "w1:t1",
+            "workspace_id": "w1",
+            "agent": "claude",
+            "agent_status": "working",
+            "focused": true,
+            "state_change_seq": 42
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`selected_pane_id`, `boot_id`, and `focused_pane_id` may be `null`; `agent` may be `null` when no agent identifier is known. `transitioning` and agent `focused` are booleans, and `state_change_seq` is an unsigned integer. Machine IDs and workspace/tab/pane IDs are strings. Each machine entry contains its current label and connection status; only online machine metadata supplies agents. Offline cached agents are excluded, not represented as live observations.
+
+Agent `focused` is true only for the actual selected client endpoint and pane; all agents report `focused=false` while `transitioning=true`. `focused_pane_id` identifies a machine's known pane selection and must not be treated as proof that this TUI is currently presenting that machine.
+
+Use **`machine_id` + `boot_id` + `pane_id`** as agent identity. Different servers may reuse pane IDs, and a restarted server may reuse them within one saved profile. `state_change_seq` describes the agent state in that server incarnation; it is not a global revision. There is deliberately **no `terminal_id`**: the client shell agent metadata does not supply one. Obtain terminal IDs through the appropriate server API if needed.
+
+Focus success is returned only after coherent machine activation, optional pane focus, and the presentation fence complete. A request is not successful merely because it was queued. Navigation is serialized; concurrent handoffs are rejected as busy, and human navigation supersedes pending API navigation. Errors and timeouts do not imply rollback; read a fresh snapshot after failure rather than blindly replaying a focus request.
+
+Focus returns the exact target machine ID and the requested pane ID, or `null` for machine-only activation:
+
+```json
+{"id":"navigate-1","result":{"machine_id":"local","pane_id":"w1:p1"}}
+```
+
+Responses echo the request ID and contain either `result` or `error`, never both:
+
+```json
+{"id":"navigate-1","error":{"code":"invalid_params","message":"pane_id must be a string when supplied"}}
+```
+
+Malformed JSON or an undecodable request ID uses `id=""`. Wire errors include `invalid_request`, `invalid_params`, `method_not_found`, `request_too_large`, `response_too_large`, `client_unavailable`, and `timeout`. Transport failure may instead close the connection or produce a CLI I/O error. Stale endpoints and nonresponsive clients are not listed as live clients.
+
+| Navigation error code | Meaning |
+| --- | --- |
+| `client_busy` | Another handoff/navigation request is already pending. |
+| `client_unavailable` | The full TUI is closing or cannot deliver/complete the request. |
+| `invalid_params` | A selector or parameter does not meet the method's contract. |
+| `machine_not_found` | The machine ID is not a known enabled target. |
+| `machine_unavailable` | The target machine is not online and usable. |
+| `pane_not_found` | The requested pane is not present on that machine. |
+| `activation_failed` | Machine activation or pane focus could not complete coherently. |
+| `superseded` | Human navigation or another authoritative selection change cancelled the request. |
+| `timeout` | The bounded request deadline expired before completion. |
+
 ## Socket transport
 
 Herdr uses newline-delimited JSON over a local socket. On Unix, that socket is a

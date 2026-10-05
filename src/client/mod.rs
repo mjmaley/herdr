@@ -17,6 +17,7 @@ mod catalog_reload;
 mod clipboard_forwarding;
 mod clipboard_images;
 mod config_reload;
+mod control;
 #[cfg(unix)]
 mod direct_graphics;
 pub(crate) mod endpoint;
@@ -466,6 +467,7 @@ async fn run_client_loop(
         repaint_pending: false,
         presentation_frozen: false,
         deferred_local_activation: None,
+        control_focus: None,
         draw_host_cursor,
         detached_process_children: Vec::new(),
         shell: config.shell_config.map(shell::ClientShellState::new),
@@ -639,6 +641,25 @@ async fn run_client_loop(
     let mut pending_activation: Option<endpoint::PendingEndpointActivation> = None;
     let mut scheduled_activation = None;
     let mut pending_catalog: Option<Result<Vec<endpoint::SavedSshEndpoint>, String>> = None;
+    let control_tx = event_tx.clone();
+    let control_server = if state.shell.is_some() && state.attach_escape.is_none() {
+        match crate::client_control::ControlServer::start(move |event| {
+            control_tx.try_send(ClientLoopEvent::Control(event)).is_ok()
+        }) {
+            Ok(server) => Some(server),
+            Err(error) => {
+                warn!(%error, "client control socket is unavailable");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let control_client_id = control_server
+        .as_ref()
+        .and_then(|server| server.path().file_stem())
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
     if state.shell.is_some() && !is_remote_client && state.attach_escape.is_none() {
         catalog_reload::watch_profiles(event_tx.clone(), should_quit.clone());
     }
@@ -794,12 +815,32 @@ async fn run_client_loop(
             }
         };
         let now = std::time::Instant::now();
+        control::cancel_disconnected_focus(&mut state, &mut write_stream, &mut pending_activation);
         if let Some(shell) = state.shell.as_mut() {
             shell.tick_popup_pending(now);
         }
 
         match event {
             ClientLoopEvent::EndpointCatalog(reload) => pending_catalog = Some(reload),
+            ClientLoopEvent::Control(event) => {
+                if let Some(endpoint_id) = control::handle_control_event(
+                    event,
+                    control_client_id,
+                    &mut state,
+                    &mut write_stream,
+                    &mut endpoint_commands,
+                    &mut pending_activation,
+                    &mut next_surface_serial,
+                    scheduled_activation.is_some(),
+                    now,
+                ) {
+                    if endpoint_catalog.select_endpoint(&endpoint_id) {
+                        if let Err(error) = endpoint_catalog.store_selection() {
+                            warn!(%error, "failed to persist client control selection");
+                        }
+                    }
+                }
+            }
             #[cfg(unix)]
             ClientLoopEvent::StdinInput(data) => {
                 let image_bridge_active = endpoint_accepts_local_images(
@@ -1871,6 +1912,7 @@ async fn run_client_loop(
                             state.shell.as_mut(),
                             &mut state.detached_process_children,
                             &mut scheduled_activation,
+                            state.control_focus.is_some(),
                         )?;
                         let repaint = repaint || dispatch_repaint;
                         if replay_mouse.is_empty() {

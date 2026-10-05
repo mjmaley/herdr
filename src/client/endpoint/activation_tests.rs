@@ -1589,3 +1589,154 @@ fn resize_message_preserves_the_latest_surface_dimensions() {
         Some(crate::protocol::ClientSurfaceSize { cols: 80, rows: 24 })
     );
 }
+
+#[test]
+fn external_focus_reports_rollback_without_claiming_navigation_success() {
+    let (shell, mut endpoints, _local_sent, _remote_sent) = shell_and_registry();
+    let mut state = crate::client::state::ClientState::test_new();
+    state.shell = Some(shell);
+    state.reported_size = (80, 24);
+    state.reported_cell_size = (8, 16);
+    let mut commands = crate::client::endpoint_commands::EndpointCommands::default();
+    let mut pending = None;
+    let mut serial = 30;
+    let (reply, mut receiver) = tokio::sync::oneshot::channel();
+    let target = endpoint();
+    let selected = crate::client::control::handle_control_event(
+        crate::client_control::ControlEvent {
+            id: "external-focus".into(),
+            command: crate::client_control::ControlCommand::Focus {
+                machine_id: crate::client::shell::control_machine_id(&target).into(),
+                pane_id: None,
+            },
+            reply,
+        },
+        "client",
+        &mut state,
+        &mut endpoints,
+        &mut commands,
+        &mut pending,
+        &mut serial,
+        false,
+        Instant::now(),
+    );
+    assert_eq!(selected, Some(target));
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(endpoints.active_id(), &ClientEndpointId::Local);
+    crate::client::shell_runtime::rollback_endpoint_activation(
+        &mut state,
+        &mut endpoints,
+        &mut pending,
+        "source rejected release".into(),
+        true,
+    );
+    let response = receiver.try_recv().unwrap();
+    assert_eq!(response["error"]["code"], "activation_failed");
+    assert!(response.get("result").is_none());
+    assert!(
+        pending.is_some(),
+        "rollback must finish even after the caller receives its error"
+    );
+    assert!(state.presentation_frozen);
+}
+
+#[test]
+fn disconnected_control_caller_prevents_late_release_from_activating_target() {
+    let (shell, mut endpoints, _local_sent, _remote_sent) = shell_and_registry();
+    let mut state = crate::client::state::ClientState::test_new();
+    state.shell = Some(shell);
+    state.reported_size = (80, 24);
+    state.reported_cell_size = (8, 16);
+    let mut commands = crate::client::endpoint_commands::EndpointCommands::default();
+    let mut pending = None;
+    let mut serial = 30;
+    let (reply, receiver) = tokio::sync::oneshot::channel();
+    let target = endpoint();
+    crate::client::control::handle_control_event(
+        crate::client_control::ControlEvent {
+            id: "cancelled-focus".into(),
+            command: crate::client_control::ControlCommand::Focus {
+                machine_id: crate::client::shell::control_machine_id(&target).into(),
+                pane_id: None,
+            },
+            reply,
+        },
+        "client",
+        &mut state,
+        &mut endpoints,
+        &mut commands,
+        &mut pending,
+        &mut serial,
+        false,
+        Instant::now(),
+    );
+    drop(receiver);
+    crate::client::control::cancel_disconnected_focus(&mut state, &mut endpoints, &mut pending);
+    assert!(state.control_focus.is_none());
+    let activation = pending
+        .as_mut()
+        .expect("coherent source restoration continues");
+    assert!(matches!(
+        activation.phase,
+        ActivationPhase::RestoringSource { .. }
+    ));
+    assert_eq!(
+        activation.receive_response(
+            &ClientEndpointId::Local,
+            1,
+            "client-shell-surface:30:off",
+            &surface_success("client-shell-surface:30:off", false, 1),
+            &mut endpoints,
+        ),
+        SurfaceActivationProgress::Stale,
+        "a late source release must not resurrect cancelled navigation"
+    );
+    assert_eq!(endpoints.active_id(), &ClientEndpointId::Local);
+}
+
+#[test]
+fn external_focus_recovers_unavailable_presentation_without_pending_handoff() {
+    let (shell, mut endpoints, _local_sent, _remote_sent) = shell_and_registry();
+    let mut state = crate::client::state::ClientState::test_new();
+    state.shell = Some(shell);
+    state.reported_size = (80, 24);
+    state.reported_cell_size = (8, 16);
+    state.freeze_presentation();
+    endpoints.set_surface_active(&ClientEndpointId::Local, false);
+    let mut commands = crate::client::endpoint_commands::EndpointCommands::default();
+    let mut pending = None;
+    let mut serial = 30;
+    let (reply, mut receiver) = tokio::sync::oneshot::channel();
+    assert_eq!(
+        crate::client::control::handle_control_event(
+            crate::client_control::ControlEvent {
+                id: "recover-local".into(),
+                command: crate::client_control::ControlCommand::Focus {
+                    machine_id: "local".into(),
+                    pane_id: None,
+                },
+                reply,
+            },
+            "client",
+            &mut state,
+            &mut endpoints,
+            &mut commands,
+            &mut pending,
+            &mut serial,
+            false,
+            Instant::now(),
+        ),
+        Some(ClientEndpointId::Local)
+    );
+    assert!(matches!(
+        pending.as_ref().map(|activation| &activation.phase),
+        Some(ActivationPhase::ActivatingTarget { .. })
+    ));
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+}

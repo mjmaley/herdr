@@ -22,6 +22,7 @@ pub(super) enum ClientLoopEvent {
         generation: u64,
     },
     EndpointSupervisor(endpoint::EndpointSupervisorEvent),
+    Control(crate::client_control::ControlEvent),
     EndpointCatalog(Result<Vec<endpoint::SavedSshEndpoint>, String>),
     ActivateEndpoint {
         endpoint_id: endpoint::ClientEndpointId,

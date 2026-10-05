@@ -284,6 +284,7 @@ fn local_selection_is_scheduled_ahead_of_a_full_event_queue() {
         None,
         &mut Vec::new(),
         &mut scheduled,
+        false,
     )
     .unwrap();
     let next = scheduled.take().or_else(|| rx.try_recv().ok());
@@ -316,6 +317,7 @@ fn dispatcher_cancels_worktree_requests_on_frozen_surface_or_failed_send() {
             Some(&mut state),
             &mut Vec::new(),
             &mut scheduled,
+            false,
         )
         .unwrap();
         assert!(repaint);
@@ -483,4 +485,43 @@ fn another_machine_disconnect_does_not_cancel_active_popup() {
     state.mark_endpoint_disconnected(&remote);
     assert!(state.popup_pending);
     assert_eq!(state.pending_requests.len(), 1);
+}
+
+#[test]
+fn human_pane_selection_supersedes_frozen_control_navigation() {
+    use crate::client::endpoint::{EndpointNegotiation, EndpointRegistry};
+    use crate::client::endpoint_commands::EndpointCommands;
+    use crate::client::ClientLoopEvent;
+
+    let mut shell = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    shell.set_snapshot(Box::new(snapshot()));
+    let actions = shell.focus_endpoint_target(ClientEndpointFocusTarget::Pane("pane_1".into()));
+    let mut endpoints = EndpointRegistry::new(
+        TestTransport { fail: false },
+        1,
+        EndpointNegotiation::default(),
+    );
+    endpoints.set_surface_active(&ClientEndpointId::Local, false);
+    let mut commands = EndpointCommands::default();
+    let mut scheduled = None;
+    crate::client::shell_runtime::dispatch_client_shell_actions(
+        actions,
+        &mut commands,
+        &mut endpoints,
+        Some(&mut shell),
+        &mut Vec::new(),
+        &mut scheduled,
+        true,
+    )
+    .unwrap();
+    assert!(matches!(
+        scheduled,
+        Some(ClientLoopEvent::ActivateEndpoint {
+            endpoint_id: ClientEndpointId::Local,
+            target: Some(ClientEndpointFocusTarget::Pane(id)),
+            ..
+        }) if id == "pane_1"
+    ));
+    assert!(shell.pending_requests.is_empty());
+    assert!(commands.disconnect(&ClientEndpointId::Local).is_empty());
 }
